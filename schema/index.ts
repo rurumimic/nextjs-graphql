@@ -20,6 +20,10 @@ export default makeSchema({
       PROJECT_DIRNAME,
       'node_modules/@types/nexus-typegen/index.d.ts'
     ),
+    schema: path.join(
+      PROJECT_DIRNAME,
+      'apollo/schema.graphql'
+    ),
   },
   typegenAutoConfig: {
     contextType: 'Context.Context',

@@ -2,6 +2,7 @@ import { queryType, intArg } from '@nexus/schema'
 
 export const Query = queryType({
   definition(t) {
+    t.crud.user()
     t.crud.users()
     t.crud.posts()
     t.crud.profiles()

@@ -187,6 +187,10 @@ export default makeSchema({
       PROJECT_DIRNAME,
       'node_modules/@types/nexus-typegen/index.d.ts'
     ),
+    schema: path.join(
+      PROJECT_DIRNAME,
+      'apollo/schema.graphql'
+    ),
   },
   typegenAutoConfig: {
     contextType: 'Context.Context',
@@ -347,4 +351,297 @@ Open `http://localhost:3000/api/graphql?query={ users { id email name posts { id
     ]
   }
 }
+```
+
+11. Apollo Client
+
+```bash
+yarn add @graphql-tools/load @graphql-tools/code-file-loader
+```
+
+`apollo/schema.js`:
+
+```js
+import { loadSchemaSync } from '@graphql-tools/load'
+import { GraphQLFileLoader } from '@graphql-tools/graphql-file-loader'
+
+const schema = loadSchemaSync('apollo/schema.graphql',
+{ loaders: [new GraphQLFileLoader()] })
+```
+
+`apollo/index.js`:
+
+```js
+import Head from 'next/head'
+import { ApolloProvider } from '@apollo/react-hooks'
+import { ApolloClient } from 'apollo-client'
+import { InMemoryCache } from 'apollo-cache-inmemory'
+
+let globalApolloClient = null
+
+/**
+ * Creates and provides the apolloContext
+ * to a next.js PageTree. Use it by wrapping
+ * your PageComponent via HOC pattern.
+ * @param {Function|Class} PageComponent
+ * @param {Object} [config]
+ * @param {Boolean} [config.ssr=true]
+ */
+export function withApollo(PageComponent, { ssr = true } = {}) {
+  const WithApollo = ({ apolloClient, apolloState, ...pageProps }) => {
+    const client = apolloClient || initApolloClient(undefined, apolloState)
+    return (
+      <ApolloProvider client= { client } >
+      <PageComponent { ...pageProps } />
+      </ApolloProvider>
+    )
+}
+
+// Set the correct displayName in development
+if (process.env.NODE_ENV !== 'production') {
+  const displayName =
+    PageComponent.displayName || PageComponent.name || 'Component'
+
+  if (displayName === 'App') {
+    console.warn('This withApollo HOC only works with PageComponents.')
+  }
+
+  WithApollo.displayName = `withApollo(${displayName})`
+}
+
+if (ssr || PageComponent.getInitialProps) {
+  WithApollo.getInitialProps = async (ctx) => {
+    const { AppTree } = ctx
+
+    // Initialize ApolloClient, add it to the ctx object so
+    // we can use it in `PageComponent.getInitialProp`.
+    const apolloClient = (ctx.apolloClient = initApolloClient({
+      res: ctx.res,
+      req: ctx.req,
+    }))
+
+    // Run wrapped getInitialProps methods
+    let pageProps = {}
+    if (PageComponent.getInitialProps) {
+      pageProps = await PageComponent.getInitialProps(ctx)
+    }
+
+    // Only on the server:
+    if (typeof window === 'undefined') {
+      // When redirecting, the response is finished.
+      // No point in continuing to render
+      if (ctx.res && ctx.res.finished) {
+        return pageProps
+      }
+
+      // Only if ssr is enabled
+      if (ssr) {
+        try {
+          // Run all GraphQL queries
+          const { getDataFromTree } = await import('@apollo/react-ssr')
+          await getDataFromTree(
+            <AppTree
+                pageProps={{
+            ...pageProps,
+            apolloClient,
+          }}
+              />
+            )
+      } catch (error) {
+        // Prevent Apollo Client GraphQL errors from crashing SSR.
+        // Handle them in components via the data.error prop:
+        // https://www.apollographql.com/docs/react/api/react-apollo.html#graphql-query-data-error
+        console.error('Error while running `getDataFromTree`', error)
+      }
+
+      // getDataFromTree does not call componentWillUnmount
+      // head side effect therefore need to be cleared manually
+      Head.rewind()
+    }
+  }
+
+  // Extract query data from the Apollo store
+  const apolloState = apolloClient.cache.extract()
+
+  return {
+    ...pageProps,
+    apolloState,
+  }
+}
+  }
+
+return WithApollo
+}
+
+/**
+ * Always creates a new apollo client on the server
+ * Creates or reuses apollo client in the browser.
+ * @param  {Object} initialState
+ */
+function initApolloClient(ctx, initialState) {
+  // Make sure to create a new client for every server-side request so that data
+  // isn't shared between connections (which would be bad)
+  if (typeof window === 'undefined') {
+    return createApolloClient(ctx, initialState)
+  }
+
+  // Reuse client on the client-side
+  if (!globalApolloClient) {
+    globalApolloClient = createApolloClient(ctx, initialState)
+  }
+
+  return globalApolloClient
+}
+
+/**
+ * Creates and configures the ApolloClient
+ * @param  {Object} [initialState={}]
+ */
+function createApolloClient(ctx = {}, initialState = {}) {
+  const ssrMode = typeof window === 'undefined'
+  const cache = new InMemoryCache().restore(initialState)
+
+  // Check out https://github.com/zeit/next.js/pull/4611 if you want to use the AWSAppSyncClient
+  return new ApolloClient({
+    ssrMode,
+    link: createIsomorphLink(ctx),
+    cache,
+  })
+}
+
+function createIsomorphLink(ctx) {
+  if (typeof window === 'undefined') {
+    const { SchemaLink } = require('apollo-link-schema')
+    const { schema } = require('./schema')
+    return new SchemaLink({ schema, context: ctx })
+  } else {
+    const { HttpLink } = require('apollo-link-http')
+
+    return new HttpLink({
+      uri: '/api/graphql',
+      credentials: 'same-origin',
+    })
+  }
+}
+```
+
+```bash
+yarn dev
+```
+
+12.  Page
+
+```tsx
+import { withApollo } from '../apollo'
+import gql from 'graphql-tag'
+import { useQuery } from '@apollo/react-hooks'
+
+const UserQuery = gql`
+  query USER {
+    users {
+      id
+      email
+      name
+      posts {
+        id
+        title
+        published
+      }
+    }
+  }
+`
+
+const Users = () => {
+  const { loading, error, data } = useQuery(UserQuery, { ssr: false })
+
+  if (loading) return <p>Loading...</p>
+  if (error) return <p>Error :(</p>
+
+  return data.users.map((result: any) => {
+    const { id, email, name, posts } = result
+    return (
+      <div key={id}>
+        <p>
+          {name} ({email})
+        </p>
+        {posts.map((result: any) => {
+          const { id, title, published } = result
+          return (
+            <p key={id}>
+              Post: "{title}" is {published ? 'published' : 'not published'}.
+            </p>
+          )
+        })}
+      </div>
+    )
+  })
+}
+
+const App = (): JSX.Element => (
+  <div>
+    <h2>
+      Apollo & Prisma
+      <span role="img" aria-label="rocket">
+        🚀
+      </span>
+    </h2>
+    <Users />
+  </div>
+)
+
+export default withApollo(App)
+```
+
+13. Finished
+
+```text
+Apollo & Prisma🚀
+
+Alice (alice@prisma.io)
+
+Post: "Hello World" is published.
+```
+
+14. Build
+
+```bash
+yarn build
+```
+
+```bash
+info  - Loaded env from .env
+Creating an optimized production build  
+
+Compiled successfully.
+
+Automatically optimizing pages  
+
+Page                                                           Size     First Load JS
+┌ λ /                                                          43.5 kB         108 kB
+├ ○ /404                                                       2.55 kB        67.3 kB
+├ λ /api/graphql
+└ λ /api/hello
++ First Load JS shared by all                                  64.7 kB
+  ├ static/pages/_app.js                                       986 B
+  ├ chunks/0d5ed275e736a30768c53cda44fb8ad2e119bbd3.478112.js  8.17 kB
+  ├ chunks/commons.8e9962.js                                   3.14 kB
+  ├ chunks/framework.7117c8.js                                 44.9 kB
+  ├ runtime/main.96ec2d.js                                     6.29 kB
+  └ runtime/webpack.ab3d41.js                                  1.21 kB
+
+λ  (Server)  server-side renders at runtime (uses getInitialProps or getServerSideProps)
+○  (Static)  automatically rendered as static HTML (uses no initial props)
+●  (SSG)     automatically generated as static HTML + JSON (uses getStaticProps)
+
+✨  Done in 6.34s.
+```
+
+15. Start
+
+```bash
+yarn start
+```
+
+```bash
+ready - started server on http://localhost:3000
 ```
